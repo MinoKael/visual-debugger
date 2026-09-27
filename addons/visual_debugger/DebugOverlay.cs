@@ -27,8 +27,6 @@ namespace VisualDebug
 	public partial class DebugOverlay : Node2D
 	{
 		private const float Pad = 3;
-		private const int NameChecksPerFrame = 8;
-		private const int NameRefreshFrames = 60;
 		private const int PurgeEvery = 60;
 
 		/// <summary>A cor de cada profundidade, repetindo a cada oito.</summary>
@@ -68,8 +66,8 @@ namespace VisualDebug
 		private DebugLevel _level;
 		private int _count;
 		private int _visited;
+		private int _unnamed;
 		private int _frame;
-		private int _nameBudget;
 		private double _drawMs;
 		private long _drawBytes;
 		private TextLine _hud = TextLine.Empty;
@@ -104,6 +102,8 @@ namespace VisualDebug
 				if (value == DebugLevel.Off)
 				{
 					// Solta as referências: nada fica preso a nó já liberado enquanto o modo está desligado.
+					foreach (var card in _cards.Values)
+						card.Detach();
 					_cards.Clear();
 					Array.Clear(_entries, 0, _entries.Length);
 					_count = 0;
@@ -124,7 +124,7 @@ namespace VisualDebug
 			_frame++;
 			_count = 0;
 			_visited = 0;
-			_nameBudget = NameChecksPerFrame;
+			_unnamed = 0;
 			var view = GetViewportRect();
 			Collect(GetTree().Root, 0, 0, view);
 
@@ -185,16 +185,17 @@ namespace VisualDebug
 			_visited++;
 			if (!_cards.TryGetValue(item, out var card))
 			{
-				card = new NodeCard(item, _text, _frame);
+				card = new NodeCard(item, _text);
 				_cards[item] = card;
 			}
-			else if (_level >= DebugLevel.Names && _nameBudget > 0 && _frame - card.NameFrame > NameRefreshFrames)
+			else if (card.NameStale)
 			{
-				_nameBudget--;
-				card.RefreshName(_text, _frame);
+				card.RefreshName(_text);
 			}
 
 			card.SeenFrame = _frame;
+			if (card.Unnamed)
+				_unnamed++;
 			var hasRect = NodeBounds.TryGet(item, card, _frame, out var local);
 			var transform = item.GetGlobalTransformWithCanvas();
 			var screen = hasRect ? Enclose(transform, local) : new Rect2(transform.Origin, Vector2.Zero);
@@ -284,7 +285,7 @@ namespace VisualDebug
 		}
 
 		/// <summary>
-		/// A barra do topo: camada, quantos nós visíveis, quanto tempo e memória gerenciada o overlay gastou no
+		/// A barra do topo: camada, quantos nós visíveis (e quantos deles sem nome dado pelo código), quanto tempo e memória gerenciada o overlay gastou no
 		/// último quadro e, na ponta direita, a posição do mouse na tela. O texto da esquerda é refeito a cada
 		/// 20 quadros, e o quadro mostrado é sempre o anterior ao da troca, então a própria barra não entra na
 		/// conta. O mouse muda todo quadro sem alocar: cada coordenada vira texto uma vez só (<see cref="Coordinate"/>).
@@ -293,9 +294,10 @@ namespace VisualDebug
 		{
 			if (_hud.IsEmpty || _frame % 20 == 0)
 			{
+				var unnamed = _level >= DebugLevel.Names ? string.Create(Invariant, $" ({_unnamed} unnamed)") : "";
 				var tracing = _traces.Capturing ? " · tracing" : "";
 				_hud = _text.Line(string.Create(Invariant,
-					$"VISUAL DEBUG · Ctrl+F{(int)_level} {LevelNames[(int)_level]} · {_visited} nodes · {_drawMs:0.00} ms · {_drawBytes} B{tracing}"));
+					$"VISUAL DEBUG · Ctrl+F{(int)_level} {LevelNames[(int)_level]} · {_visited} nodes{unnamed} · {_drawMs:0.00} ms · {_drawBytes} B{tracing}"));
 			}
 
 			var mouse = GetLocalMousePosition();
@@ -341,7 +343,7 @@ namespace VisualDebug
 		{
 			var card = entry.Card;
 			var lines = 0;
-			Push(ref lines, card.Title, Hue(entry.Depth).Lightened(0.35f));
+			Push(ref lines, card.Title, card.Unnamed ? DimInk : Hue(entry.Depth).Lightened(0.35f));
 			if (_level >= DebugLevel.Values)
 			{
 				Push(ref lines, card.Transform, ValueInk);
@@ -505,7 +507,10 @@ namespace VisualDebug
 			}
 
 			foreach (var item in _stale)
-				_cards.Remove(item);
+			{
+				if (_cards.Remove(item, out var card))
+					card.Detach();
+			}
 			if (_inspected != null && _frame - _inspected.SeenFrame > PurgeEvery)
 				_inspected = null;
 		}

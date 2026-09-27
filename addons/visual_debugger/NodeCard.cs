@@ -33,7 +33,8 @@ namespace VisualDebug
 	/// por quadro; um que se move refaz só a própria linha de valores.
 	///
 	/// O cartão também segura a referência do nó, e assim o Godot devolve sempre o mesmo objeto C# para ele
-	/// em <c>GetChild</c>, em vez de criar um invólucro novo a cada quadro.
+	/// em <c>GetChild</c>, em vez de criar um invólucro novo a cada quadro. O nome não é relido a cada quadro
+	/// (<c>Node.Name</c> cria um <see cref="StringName"/> por leitura): o sinal <c>renamed</c> do nó avisa.
 	/// </summary>
 	internal sealed class NodeCard
 	{
@@ -46,8 +47,9 @@ namespace VisualDebug
 		private Rect2 _slowBounds;
 		private bool _slowValid;
 		private int _slowFrame = -SlowRefreshFrames;
+		private readonly Action _renamed;
 
-		public NodeCard(CanvasItem item, TextStyle style, int frame)
+		public NodeCard(CanvasItem item, TextStyle style)
 		{
 			Item = item;
 			Id = item.GetInstanceId();
@@ -55,7 +57,9 @@ namespace VisualDebug
 			Native = item.GetClass();
 			ScriptPath = FindScript(item);
 			ScenePath = FindScene(item);
-			RefreshName(style, frame);
+			_renamed = () => NameStale = true;
+			item.Renamed += _renamed;
+			RefreshName(style);
 		}
 
 		public CanvasItem Item { get; }
@@ -70,10 +74,14 @@ namespace VisualDebug
 		public string Name { get; private set; } = "";
 		public Trace? Trace { get; private set; }
 
+		/// <summary>Sem nome dado pelo código: o Godot inventou um (<c>@Label@123</c>), ou o dado se repetiu entre irmãos.</summary>
+		public bool Unnamed { get; private set; }
+
 		/// <summary>O último quadro em que o nó estava visível; cartão esquecido há tempo é descartado.</summary>
 		public int SeenFrame { get; set; }
 
-		public int NameFrame { get; private set; }
+		/// <summary>O nome mudou desde a última leitura: o overlay relê na próxima vez que precisar dele.</summary>
+		public bool NameStale { get; private set; }
 
 		/// <summary>Sobe a cada texto refeito: o inspetor sabe quando se refazer.</summary>
 		public int Version { get; private set; }
@@ -92,23 +100,34 @@ namespace VisualDebug
 		/// <summary><c>Script.cs  @ Arquivo.cs:linha</c>.</summary>
 		public TextLine Origin { get; private set; } = TextLine.Empty;
 
-		/// <summary>
-		/// Relê o nome. <c>Node.Name</c> cria um <see cref="StringName"/> a cada leitura, então o overlay
-		/// chama isto com orçamento (alguns cartões por quadro), e o StringName é descartado na hora.
-		/// Nome automático (<c>@Label@123</c>, dado a nó criado em código) encurta para <c>@123</c>.
-		/// </summary>
-		public void RefreshName(TextStyle style, int frame)
+		/// <summary>Relê o nome (na criação e depois de cada aviso de <c>renamed</c>); o StringName é descartado na hora.</summary>
+		public void RefreshName(TextStyle style)
 		{
-			NameFrame = frame;
+			NameStale = false;
 			using var name = Item.Name;
 			var text = name.ToString();
 			if (text == Name && !Title.IsEmpty)
 				return;
 
 			Name = text;
-			var shown = text.StartsWith('@') ? text[text.LastIndexOf('@')..] : text;
+			Unnamed = text.StartsWith('@');
+			var shown = Shown(text);
 			Title = style.Line(shown == Class ? Class : $"{shown} : {Class}");
 			Version++;
+		}
+
+		/// <summary>
+		/// O nome no rótulo. O Godot chama de <c>@Classe@123</c> o nó sem nome e de <c>@Nome@123</c> o que
+		/// chegou com um nome que um irmão já tinha: o primeiro encurta para <c>@123</c> (a classe já está no
+		/// rótulo), o segundo fica <c>Nome@123</c>, com o nome que o código deu.
+		/// </summary>
+		private string Shown(string name)
+		{
+			if (!name.StartsWith('@'))
+				return name;
+			var at = name.LastIndexOf('@');
+			var given = at > 1 ? name[1..at] : "";
+			return given.Length == 0 || given == Native || given == Class ? name[at..] : given + name[at..];
 		}
 
 		public void Update(in Snapshot values, TextStyle style)
@@ -138,6 +157,13 @@ namespace VisualDebug
 			var script = ScriptPath == null ? "" : ScriptPath.GetFile() + "  ";
 			Origin = style.Line($"{script}@ {trace?.Site ?? "?"}");
 			Version++;
+		}
+
+		/// <summary>Solta o aviso de nome do nó, quando o cartão é descartado (nó liberado já soltou sozinho).</summary>
+		public void Detach()
+		{
+			if (GodotObject.IsInstanceValid(Item))
+				Item.Renamed -= _renamed;
 		}
 
 		/// <summary>
